@@ -1,5 +1,6 @@
 import asyncio
 import logging
+from typing import Literal, assert_never
 
 DEFAULT_ROOM = "LOBBY"
 MAX_NAME_LENGTH = 16
@@ -13,18 +14,30 @@ class Client:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.reader: asyncio.StreamReader = reader
         self.writer: asyncio.StreamWriter = writer
-        self.name: str | None = None
-        self.room_name: str = DEFAULT_ROOM
+        self.name: str = ""
+        self.room_name: str = ""
+        self.mode: Literal["terminal", "tty"] = "tty"
         self._closing: bool = False
 
-    async def send_message(self, message: str) -> None:
+    async def send_raw(self, data: bytes) -> None:
         if self._closing:
             return
         try:
-            self.writer.write(f"{message}\r\n".encode("ascii"))
+            self.writer.write(data)
             await self.writer.drain()
         except ConnectionError:
             self._closing = True
+
+    async def send_message(self, message: str) -> None:
+        message = message.rstrip()
+        match self.mode:
+            case "tty":
+                data = message.encode("ascii", errors="replace") + b"\r\n"
+            case "terminal":
+                data = b"\033[s\n\r\033[A\033[L" + message.encode() + b"\033[u\033[B"
+            case _:
+                assert_never(self.mode)
+        await self.send_raw(data)
 
     async def disconnect(self) -> None:
         self._closing = True
@@ -65,15 +78,17 @@ class ChatServer:
             self.clients.add(client)
             await self.join_room(client, DEFAULT_ROOM)
 
-            logger.info("%s logged in and joined %s", client.name, DEFAULT_ROOM)
+            logger.info("%s logged in as %s", addr, client.name)
 
             # 3. Main Loop
             while True:
+                if client.mode == "terminal":
+                    await client.send_raw(b"> ")
                 data = await reader.readline()
                 if not data:  # EOF (Client disconnected)
                     break
 
-                message = data.decode("ascii").strip()
+                message = data.decode().strip()
                 if not message:
                     continue
 
@@ -91,16 +106,26 @@ class ChatServer:
             logger.info("Connection closed for %s", addr)
 
     async def login_handshake(self, client: Client) -> None:
-        await client.send_message("Welcome! Please enter your display name:")
+        await client.send_message("Welcome to netchat!")
 
         while True:
-            await client.send_message("Name: ")
+            await client.send_raw(b"Does your terminal support ANSI Control Sequences? (Y/n): ")
+            data = await client.reader.readline()
+            if data.strip() in {b"Y", b"y", b""}:
+                client.mode = "terminal"
+                break
+            if data.strip() in {b"N", b"n"}:
+                client.mode = "tty"
+                break
+
+        while True:
+            await client.send_raw(b"Enter Username: ")
             data = await client.reader.readline()
             if not data:
                 msg = "Client disconnected during login"
                 raise ConnectionError(msg)
 
-            name = data.decode("ascii").strip()
+            name = data.decode().strip()
 
             if not name:
                 continue
@@ -121,7 +146,7 @@ class ChatServer:
         room = self.rooms.get(sender.room_name, set())
         formatted_msg = f"{sender.name}: {message}"
 
-        logger.info("Chat: %s", formatted_msg)
+        logger.info("[%s] %s", sender.room_name, formatted_msg)
 
         for user in room:
             if user != sender:
@@ -160,14 +185,14 @@ class ChatServer:
                 await user.send_message(f"* {message}")
 
     async def cleanup_client(self, client: Client) -> None:
-        if client in self.clients:
-            self.clients.remove(client)
+        self.clients.discard(client)
 
-        if client.room_name and client.room_name in self.rooms:
+        if client.room_name in self.rooms:
             self.rooms[client.room_name].discard(client)
             await self.system_message(client.room_name, f"{client.name} has disconnected.")
             if not self.rooms[client.room_name]:
                 del self.rooms[client.room_name]
+                logger.info("Room %s deleted (empty).", client.room_name)
 
         await client.disconnect()
 
@@ -210,7 +235,7 @@ class ChatServer:
 
     async def cmd_who(self, client: Client, args: str) -> None:  # noqa: ARG002
         if client.room_name in self.rooms:
-            users: str = ", ".join(u.name or "(anon)" for u in self.rooms[client.room_name])
+            users: str = ", ".join(u.name for u in self.rooms[client.room_name])
             await client.send_message(f"Users in {client.room_name}: {users}")
 
     async def cmd_help(self, client: Client, args: str) -> None:  # noqa: ARG002
