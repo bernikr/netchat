@@ -29,5 +29,5 @@ ENV PATH="/venv/bin:$PATH"
 
 ARG VERSION
 ENV VERSION=${VERSION:-"unspecified"}
-EXPOSE 8888
+EXPOSE 23
 CMD ["python", "-m", "main"]

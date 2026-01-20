@@ -49,7 +49,7 @@ class Client:
 
 
 class ChatServer:
-    def __init__(self, host: str = "127.0.0.1", port: int = 8888) -> None:
+    def __init__(self, host: str, port: int) -> None:
         self.host: str = host
         self.port: int = port
         # State management
@@ -105,18 +105,16 @@ class ChatServer:
             await self.cleanup_client(client)
             logger.info("Connection closed for %s", addr)
 
-    async def login_handshake(self, client: Client) -> None:
+    async def login_handshake(self, client: Client) -> None:  # noqa: C901
         await client.send_message("Welcome to netchat!")
 
-        while True:
-            await client.send_raw(b"Does your terminal support ANSI Control Sequences? (Y/n): ")
-            data = await client.reader.readline()
-            if data.strip() in {b"Y", b"y", b""}:
+        try:
+            data = await asyncio.wait_for(client.reader.read(1024), timeout=0.2)
+            if b"\xff" in data:
+                logger.info("Detected telnet negotiation bytes from client.")
                 client.mode = "terminal"
-                break
-            if data.strip() in {b"N", b"n"}:
-                client.mode = "tty"
-                break
+        except TimeoutError:
+            pass  # No data received, proceed normally
 
         while True:
             await client.send_raw(b"Enter Username: ")
@@ -140,7 +138,18 @@ class ChatServer:
 
             client.name = name
             await client.send_message(f"Welcome, {client.name}!")
-            return
+            break
+
+        while client.mode == "tty":
+            await client.send_raw(b"Does your terminal support ANSI Control Sequences? (Y/n): ")
+            data = await client.reader.readline()
+
+            if data.strip() in {b"Y", b"y", b""}:
+                client.mode = "terminal"
+                break
+            if data.strip() in {b"N", b"n"}:
+                client.mode = "tty"
+                break
 
     async def broadcast_chat(self, sender: Client, message: str) -> None:
         room = self.rooms.get(sender.room_name, set())
@@ -245,7 +254,7 @@ class ChatServer:
 
 
 async def main() -> None:
-    chat_server = ChatServer("0.0.0.0", 8888)  # noqa: S104
+    chat_server = ChatServer("0.0.0.0", 23)  # noqa: S104
     await chat_server.start()
 
 
