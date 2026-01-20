@@ -27,8 +27,6 @@ COPY --from=env-builder /venv /venv
 COPY --from=app-builder /venv /venv
 ENV PATH="/venv/bin:$PATH"
 
-COPY log_config.yaml ./
-
 ARG VERSION
 ENV VERSION=${VERSION:-"unspecified"}
 EXPOSE 8888
